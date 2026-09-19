@@ -1,0 +1,22 @@
+backend:
+  name: github
+  repo: owner/blog
+
+collections:
+  - name: posts
+    folder: src/content/posts
+    fields:
+      - { name: _slug, widget: string }
+      - { name: title, widget: string }
+      - { name: published, widget: datetime }
+      - { name: author, widget: string }
+      - { name: updated, widget: datetime, required: false }
+      - { name: tags, widget: list, required: false }
+      - { name: seriesOrder, widget: number, required: false }
+      - { name: link, widget: list, required: false }
+      - { name: body, widget: markdown }
+
+  - name: spec
+    folder: src/content/spec
+    fields:
+      - { name: body, widget: markdown }

@@ -1,0 +1,19 @@
+backend:
+  name: github
+  repo: owner/blog
+
+collections:
+  - name: posts
+    folder: src/content/posts
+    fields:
+      - { name: title, widget: string }
+      # `date` is not in the schema, so Zod would strip it without complaint.
+      - { name: date, widget: datetime }
+      # `published` is required by the schema but absent here entirely.
+      # `author` is required by the schema but declared optional here.
+      - { name: author, widget: string, required: false }
+
+  - name: settings
+    folder: src/content/settings
+    fields:
+      - { name: body, widget: markdown }

@@ -1,0 +1,103 @@
+name: Build and Deploy
+
+# Only master, deliberately.
+#
+# Sveltia's Editorial Workflow keeps every unpublished entry on its own cms/*
+# branch behind a draft pull request, where required fields may still be empty.
+# Firefly's schema declares `published` as a required date, so a draft that
+# lacks it fails validation -- building those branches would mean a red build
+# every time you save a draft. It also means a draft save costs no Actions
+# minutes, which matters: the theme's own build.yml and deploy.yml each trigger
+# on every push and together dwarf this workflow.
+#
+# Do not add `pull_request` or another branch here. See docs/adr/0008.
+on:
+  push:
+    branches: [master]
+  # Onboarding pushes the injected files before the VPS_* secrets exist, so the
+  # very first run of this workflow always fails. This lets it be re-run once
+  # they are set, without inventing an empty commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fireflyer-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The build reads git history for post dates in some themes; harmless
+          # otherwise and cheap at this size.
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # No version here: pnpm/action-setup reads `packageManager` from
+          # package.json, so it follows the theme's own pin on updates.
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+        env:
+          # The theme's github-card generator queries the GitHub API for any
+          # repository referenced in content as `::github{repo=...}`. Without a
+          # token those calls are rate-limited; with one they are not. Posts that
+          # do not use the directive make no calls at all.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          {
+            echo "Host *"
+            echo "  StrictHostKeyChecking accept-new"
+            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Upload release and switch
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_BASE: ${{ secrets.VPS_BASE }}
+        run: |
+          set -euo pipefail
+          release="$(date -u +%Y%m%d%H%M%S)"
+          target="$VPS_USER@$VPS_HOST"
+          opts=(-i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes)
+          echo "deploying release $release to $target:$VPS_BASE"
+
+          ssh "${opts[@]}" "$target" "mkdir -p '$VPS_BASE/releases/$release'"
+
+          # tar, not rsync. Every release lands in a fresh empty directory, so
+          # rsync's delta transfer and --delete have nothing to do, and a
+          # hosting-panel server may well not have rsync installed at all --
+          # measured, one did not. tar is on every Debian by default.
+          tar -czf - -C dist . \
+            | ssh "${opts[@]}" "$target" "tar -xzf - -C '$VPS_BASE/releases/$release'"
+
+          # The script lives at $VPS_BASE/release.sh and derives its own BASE
+          # from its location, so nothing here has to pass it through.
+          ssh "${opts[@]}" "$target" "bash '$VPS_BASE/release.sh' '$release'"
