@@ -199,39 +199,61 @@ say "  pushed to $FTK_SLUG"
 # to happen after the push, because that is when GitHub registers the workflows.
 
 step "disabling the theme's own workflows"
-for name in "${UPSTREAM_CI[@]}"; do
+
+# GitHub registers a repository's workflows asynchronously, seconds after the
+# push that first gives them a branch to live on. An earlier version checked
+# immediately, found nothing registered, and reported "nothing to disable" --
+# leaving the theme's CI running, which is the expensive outcome this step
+# exists to prevent. Poll for them, using the single-workflow endpoint so no JSON
+# has to be parsed.
+registered=0
+for ((attempt = 0; attempt < 20; attempt++)); do
 	code="$(curl -sS --config "$CURLRC" -o /dev/null -w '%{http_code}' \
-		-X PUT "$API/repos/$FTK_SLUG/actions/workflows/$name/disable")"
-	case "$code" in
-	204) say "  $name disabled" ;;
-	404) say "  $name not registered, nothing to disable" ;;
-	*) say "  $name could not be disabled (HTTP $code) -- check it in the Actions tab" ;;
-	esac
+		"$API/repos/$FTK_SLUG/actions/workflows/${UPSTREAM_CI[0]}")"
+	if [ "$code" = '200' ]; then
+		registered=1
+		break
+	fi
+	sleep 3
 done
 
-# Disabling does not stop runs the push already queued, and those are exactly
-# the minutes this is about. Cancel them, scoped per workflow so our own deploy
-# is never touched. Best effort: a run that starts in the moments between the
-# push and the disable can still get going, so the first setup may cost a few
-# minutes regardless.
-cancelled=0
-for name in "${UPSTREAM_CI[@]}"; do
-	for state in in_progress queued; do
-		# The response is pretty-printed, so collapse whitespace before slicing it.
-		# Querying per workflow is what keeps this from touching our own deploy:
-		# a wrong id in the list can only 404.
-		ids="$(api "$API/repos/$FTK_SLUG/actions/workflows/$name/runs?status=$state&per_page=100" |
-			tr -d ' \n' | sed 's/.*"workflow_runs":\[//' |
-			grep -o '"id":[0-9]*' | cut -d: -f2 || true)"
-		for id in $ids; do
-			curl -sS --config "$CURLRC" -o /dev/null \
-				-X POST "$API/repos/$FTK_SLUG/actions/runs/$id/cancel" || true
-			cancelled=$((cancelled + 1))
+if [ "$registered" -eq 0 ]; then
+	say '  GitHub has not registered the workflows yet, so they could not be disabled.'
+	say "  Open https://github.com/$FTK_SLUG/actions in a minute or two, and use the"
+	say '  Disable workflow button on build.yml and on deploy.yml. Nothing else is'
+	say '  affected: the rest of setup is done.'
+else
+	for name in "${UPSTREAM_CI[@]}"; do
+		code="$(curl -sS --config "$CURLRC" -o /dev/null -w '%{http_code}' \
+			-X PUT "$API/repos/$FTK_SLUG/actions/workflows/$name/disable")"
+		case "$code" in
+		204) say "  $name disabled" ;;
+		*) say "  $name could not be disabled (HTTP $code) -- check it in the Actions tab" ;;
+		esac
+	done
+
+	# Disabling does not stop runs the push already queued, and those are exactly
+	# the minutes this is about. Cancel them, scoped per workflow so our own
+	# deploy is never touched. Best effort: a run that starts between the push and
+	# the disable can still get going, so the first setup may cost a few minutes.
+	cancelled=0
+	for name in "${UPSTREAM_CI[@]}"; do
+		for state in in_progress queued; do
+			# The response is pretty-printed, so collapse whitespace before
+			# slicing it. A wrong id in the list can only 404.
+			ids="$(api "$API/repos/$FTK_SLUG/actions/workflows/$name/runs?status=$state&per_page=100" |
+				tr -d ' \n' | sed 's/.*"workflow_runs":\[//' |
+				grep -o '"id":[0-9]*' | cut -d: -f2 || true)"
+			for id in $ids; do
+				curl -sS --config "$CURLRC" -o /dev/null \
+					-X POST "$API/repos/$FTK_SLUG/actions/runs/$id/cancel" || true
+				cancelled=$((cancelled + 1))
+			done
 		done
 	done
-done
-if [ "$cancelled" -gt 0 ]; then
-	say "  cancelled $cancelled run(s) the push had started"
+	if [ "$cancelled" -gt 0 ]; then
+		say "  cancelled $cancelled run(s) the push had started"
+	fi
 fi
 
 # ---------------------------------------------------------------------------
