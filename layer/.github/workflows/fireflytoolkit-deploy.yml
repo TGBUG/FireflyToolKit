@@ -10,20 +10,20 @@ name: Build and Deploy
 # minutes, which matters: the theme's own build.yml and deploy.yml each trigger
 # on every push and together dwarf this workflow.
 #
-# Do not add `pull_request` or another branch here. See docs/adr/0008.
+# Do not add `pull_request` or another branch here.
 on:
   push:
     branches: [master]
-  # Onboarding pushes the injected files before the VPS_* secrets exist, so the
-  # very first run of this workflow always fails. This lets it be re-run once
-  # they are set, without inventing an empty commit.
+  # Setup pushes the injected files before the VPS_* secrets exist, so the very
+  # first run of this workflow always fails. This lets it be re-run once they
+  # are set, without inventing an empty commit.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: fireflyer-deploy-${{ github.ref }}
+  group: fireflytoolkit-deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -33,8 +33,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # The build reads git history for post dates in some themes; harmless
-          # otherwise and cheap at this size.
+          # The theme's build reads git history for post dates.
           fetch-depth: 0
 
       - name: Set up pnpm
@@ -52,6 +51,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Before the build, so a config the theme no longer accepts is caught in
+      # seconds rather than after a full build. Read-only and dependency-free:
+      # it parses the theme's TypeScript by scanning it and reads config.json.
+      - name: Check the CMS config against the theme's schema
+        run: node .github/scripts/check-schema.mjs
 
       - name: Build
         run: pnpm run build

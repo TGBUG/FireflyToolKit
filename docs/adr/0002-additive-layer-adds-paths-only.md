@@ -1,36 +1,38 @@
-# The additive layer only adds paths, and is injected idempotently
+# The layer only adds paths, and is copied in by name
 
-Fireflyer delivers value by copying files into a blog repo, not by being a git remote of it. Fireflyer's history is unrelated to Firefly's, so `git pull fireflyer` fails with unrelated histories; making it work would require Fireflyer itself to be a fork of Firefly, turning every theme update into a two-hop merge. So the layer is stored at `src/fireflyer/layer/` mirroring a blog repository's root, and `inject` copies it across. Dotfiles are stored un-dotted and renamed on the way in, so that neither git nor the packaging tooling has to reason about them.
+FireflyToolKit delivers its value by copying files into a blog repo, not by being a git remote of it. Its history is unrelated to Firefly's, so `git pull` from it fails with unrelated histories; making that work would require FireflyToolKit to be a fork of Firefly, turning every theme update into a two-hop merge. So the files live at `layer/` mirroring a blog repository's root, and `ftk.sh` copies them across with `cp -R`.
 
-Every injected filename is one Firefly does not ship:
+Every filename in the layer is one Firefly does not ship:
 
 ```
 public/admin/index.html
-public/admin/config.yml
+public/admin/config.json
 public/admin/sveltia-cms.js
 public/admin/chunks/react-dom.js
-.github/workflows/fireflyer-deploy.yml
+.github/workflows/fireflytoolkit-deploy.yml
+.github/scripts/check-schema.mjs
 deploy/release.sh
-scripts/fireflyer-merge-upstream.sh
-src/content/.gitattributes
-FIREFLYER.md
+scripts/fireflytoolkit-merge-upstream.sh
 .node-version
+FIREFLYTOOLKIT.md
 ```
 
-Two corrections to earlier versions of that list are worth keeping. It is **filenames, not directories**: Firefly ships `.github/workflows/build.yml` and `deploy.yml` already, so a layer file called `deploy.yml` would overwrite a shipped one and conflict on every upstream merge — hence `fireflyer-deploy.yml`. And `.gitattributes` is not free either: Firefly ships one at the repository root holding `* text=auto eol=lf`, so the content protection lives at `src/content/.gitattributes`, which upstream does not have and which is also more precise about what it covers.
+Two corrections to earlier versions of that list are worth keeping. It is **filenames, not directories**: Firefly ships `.github/workflows/build.yml` and `deploy.yml` already, so a layer file called `deploy.yml` would overwrite a shipped one and conflict on every upstream merge — hence `fireflytoolkit-deploy.yml`. And the theme ships its own root `.gitattributes`, so a layer `.gitattributes` is not a free path either.
 
-## What protecting `src/content/` actually buys
+## Which copy wins
 
-`src/content/.gitattributes` marks the content directory `merge=ours`, and `inject` defines that driver in the blog repo's `.git/config`. Both halves are required: the attribute names the driver, and the driver has to be repo-local because `.git/config` is never committed. A fresh clone therefore has the attribute and no working driver until `inject` runs again — which is why every run ends by saying so, and why `drift-check` reports a missing driver.
+An earlier version of this decision had the tool double as the runtime source of truth: re-injecting would overwrite whatever a blog repo had, on the theory that drift between the two was the thing to prevent. That is no longer how it works, and the reason is the tool's shape.
 
-The protection is **narrower than an earlier draft claimed**. A merge driver only runs for a file that exists on both sides with conflicting content. When a theme update edits a demo post this blog deleted — the case that actually happens during setup — git raises a `modify/delete` conflict, never consults the driver, and leaves upstream's copy in the tree, so the deleted post silently returns. `git merge -X ours` was measured against git 2.45 and behaves identically. So `scripts/fireflyer-merge-upstream.sh` resolves those conflicts explicitly, and separately reports any file upstream *added* under `src/content/` — an addition conflicts with nothing, and would otherwise be published without anyone noticing.
+The tool runs once, at setup, on the server — and then it is gone. There is no second `inject` to reconcile anything with. What exists afterwards is a blog repo holding a copy of the layer, which the owner is free to edit: the deploy workflow, the merge script, the CMS config. Those edits are the point, not drift, and there is nothing to overwrite them. A later re-run of `ftk.sh` refuses to touch a repository that already has branches, so it cannot silently revert them either.
 
-Files under `src/config/` are deliberately left unprotected. Theme updates add configuration keys there, and those changes should land.
+The one thing that *is* checked after setup is the pair that fails quietly: `config.json` against the theme's Zod schema, in the deploy workflow, before the build. See ADR-0009.
 
-## The two things that drift
+## The content protection that used to live here
 
-`drift-check` covers both, because both fail silently.
+The layer previously carried `src/content/.gitattributes` marking content `merge=ours`, paired with a `merge.ours` driver written into the blog repo's `.git/config`. Both are gone.
 
-**Schema drift.** `config.yml` and the Zod schema in `src/content.config.ts` can diverge. A field the schema does not know is stripped by Zod without complaint, so the CMS reports a successful save and the value goes nowhere. In the other direction, a schema-required field the config never declares cannot be supplied by the CMS at all, and the build fails only after an entry is published. This is checked rather than prevented by a shared source of truth, because the single-source packages (`@pattform/cms-kit`, `astro-loader-sveltia-cms`) modify `astro.config.mjs` and `src/content.config.ts` — the two files Firefly's own update guide warns against touching.
+The driver had a worse problem than its cost. It only runs for a file present on both sides, so it did nothing for the case that actually occurs — upstream editing a demo post this blog deleted. Git reports that as a modify/delete conflict, never consults the driver, and (measured against git 2.45) leaves upstream's copy in the tree, so the deleted post comes back. `git merge -X ours` behaves identically.
 
-**Repository state.** Firefly's `build.yml` (`astro check` and `astro build`, across a Node 22/23 matrix) and `deploy.yml` (a full build plus a GitHub Pages deploy) both trigger on every push to `master`, costing far more runner time than this project's own deploy. `init` disables both through the GitHub API, which is repository state rather than file state and so survives upstream merges. Because upstream can later add a workflow that arrives enabled, `drift-check` reads the workflow list back from the API and reports anything unexpected or re-enabled.
+Worse, the driver was **machine-local state**: `.git/config` is never committed, so every fresh clone had the attribute and no working driver, and the documented remedy was to re-run the tool. That is what made the tool look like something with a lifecycle rather than a one-shot setup step.
+
+`scripts/fireflytoolkit-merge-upstream.sh` now handles both cases explicitly, at the moment they matter, and needs nothing on the machine beforehand: content conflicts resolve to ours, deliberate deletions stay deletions, and `src/config/` conflicts are left for the human because those are a theme update offering new options. `-X ours` is deliberately not used, since it would swallow that last category too.

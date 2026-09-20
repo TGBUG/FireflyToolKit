@@ -3,6 +3,10 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="robots" content="noindex" />
+		<!-- JSON rather than YAML, so the schema check in the deploy workflow can read
+		it with JSON.parse and needs no YAML parser. Sveltia requires this link tag to
+		find a config that is not the default config.yml. -->
+		<link href="./config.json" type="application/json" rel="cms-config-url" />
 		<title>Content Manager</title>
 	</head>
 	<body>
