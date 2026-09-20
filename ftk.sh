@@ -201,13 +201,16 @@ say "  pushed to $FTK_SLUG"
 step "disabling the theme's own workflows"
 
 # GitHub registers a repository's workflows asynchronously, seconds after the
-# push that first gives them a branch to live on. An earlier version checked
-# immediately, found nothing registered, and reported "nothing to disable" --
-# leaving the theme's CI running, which is the expensive outcome this step
-# exists to prevent. Poll for them, using the single-workflow endpoint so no JSON
-# has to be parsed.
+# push that first gives them a branch to live on: measured, none are registered
+# immediately and all of them are a few seconds later. An earlier version checked
+# once, found nothing, and reported "nothing to disable" -- leaving the theme's CI
+# running, which is the expensive outcome this step exists to prevent.
+#
+# Two minutes is slack, and costs nothing when things are working: the loop exits
+# the moment they appear. It only decides how long to wait before falling back to
+# telling the operator to disable the two workflows by hand.
 registered=0
-for ((attempt = 0; attempt < 20; attempt++)); do
+for ((attempt = 0; attempt < 40; attempt++)); do
 	code="$(curl -sS --config "$CURLRC" -o /dev/null -w '%{http_code}' \
 		"$API/repos/$FTK_SLUG/actions/workflows/${UPSTREAM_CI[0]}")"
 	if [ "$code" = '200' ]; then
@@ -218,10 +221,14 @@ for ((attempt = 0; attempt < 20; attempt++)); do
 done
 
 if [ "$registered" -eq 0 ]; then
-	say '  GitHub has not registered the workflows yet, so they could not be disabled.'
-	say "  Open https://github.com/$FTK_SLUG/actions in a minute or two, and use the"
-	say '  Disable workflow button on build.yml and on deploy.yml. Nothing else is'
-	say '  affected: the rest of setup is done.'
+	say '  the theme workflows could not be disabled: GitHub reports none registered'
+	say '  for this repository, so there was nothing to switch off.'
+	say ''
+	say '  This has been seen after this script runs, and the cause is not yet known,'
+	say '  so no explanation is offered here. The remedy is one click. Open:'
+	say "      https://github.com/$FTK_SLUG/actions"
+	say '  click Enable Actions if offered, wait for build.yml and deploy.yml to show'
+	say '  up, then use Disable workflow on each. Everything else here is done.'
 else
 	for name in "${UPSTREAM_CI[@]}"; do
 		code="$(curl -sS --config "$CURLRC" -o /dev/null -w '%{http_code}' \
