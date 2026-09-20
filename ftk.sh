@@ -62,6 +62,11 @@ case "$FTK_SLUG" in
 */*) : ;;
 *) fail "expected owner/name, got '$FTK_SLUG'" ;;
 esac
+# It gets substituted into the CMS configuration, so keep it to characters a
+# repository name can actually contain.
+case "$FTK_SLUG" in
+*[!A-Za-z0-9._/-]*) fail "'$FTK_SLUG' contains characters a repository name cannot have" ;;
+esac
 
 if [ -z "${FTK_TOKEN:-}" ]; then
 	printf 'access token (Contents, Actions and Workflows, for that repository): '
@@ -175,6 +180,18 @@ git clone --depth 1 --quiet "$TOOLKIT" "$WORK/toolkit"
 [ -d "$WORK/toolkit/layer" ] || fail "the toolkit repository has no layer/ directory"
 
 cp -R "$WORK/toolkit/layer/." "$WORK/blog/"
+
+# The CMS has to be told which repository to read and write. The layer ships a
+# placeholder there, and a plain copy leaves it literal -- Sveltia then refuses
+# the whole configuration with "It must be in owner/repo format".
+config_json="$WORK/blog/public/admin/config.json"
+[ -f "$config_json" ] || fail "the layer has no public/admin/config.json"
+sed -i "s|__FIREFLYTOOLKIT_REPO__|$FTK_SLUG|g" "$config_json"
+if grep -q '__FIREFLYTOOLKIT_REPO__' "$config_json"; then
+	fail "could not write the repository name into public/admin/config.json"
+fi
+say "  CMS configured for $FTK_SLUG"
+
 git -C "$WORK/blog" status --short | sed 's/^/  /'
 
 git -C "$WORK/blog" add -A
