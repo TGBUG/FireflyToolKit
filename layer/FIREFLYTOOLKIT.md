@@ -33,13 +33,56 @@ FireflyToolKit 给一份原版的 [Firefly](https://github.com/CuteLeaf/Firefly)
 
 **编辑器里有一个很难发现的左右互换按钮。** 如果发现预览跑到了左边，多半是这个开关被碰到了，不是 bug。
 
+## 相册
+
+**相册无法在 CMS 里管理，只能手工做。** 三件实测过的事决定了这一点：
+
+- Sveltia 改不了 `src/config/galleryConfig.ts`——相册的登记（id、名称、日期、标签、封面、密码）全在那个 TypeScript 文件里
+- 资源库**建不了子目录**（把整个文件夹拖进去也无效），而每个相册就是一个目录
+- 资源上传是直接提交，**每传一张就触发一次构建部署**
+
+所以新建相册要在**一次提交里**做完两件事：
+
+1. 在 `src/config/galleryConfig.ts` 的 `albums` 数组里加一项。`id` **同时是目录名和 URL 路径**：
+
+```ts
+{
+  id: "travel-shanghai",     // 对应 public/gallery/travel-shanghai/
+  name: "上海之旅",
+  description: "上海的美好回忆",
+  location: "上海",
+  date: "2025-04-10",
+  tags: ["旅行", "上海"],
+}
+```
+
+2. 建立 `public/gallery/<id>/` 目录，把照片放进去。
+
+照片在构建时自动扫描，**不需要逐张声明**。支持 `jpg`、`png`、`webp`、`avif`、`gif`。
+
+（相册是这个博客上**唯一完全在 CMS 之外**的部分。其余内容——文章、动态、项目、单页——都能在浏览器里写完。）
+
+**主题自带两个 demo 相册**：`firefly-2026` 和 `encrypted-test`。配置时应该删掉它们，而且**要删两处**——`public/gallery/` 下对应的目录，**以及 `galleryConfig.ts` 里对应的登记**。只删目录的话，相册页会指向已经不存在的路径。
+
+**封面按这个优先级自动选**：`galleryConfig.ts` 里的 `cover` 字段 → 目录里名为 `cover.*` 的文件 → 按文件名排序的第一张。
+
+**外部图片**：在相册目录下放一个 `urls.txt`，每行一个 URL，`#` 开头的是注释。本地和外部图片在构建时合并，一起进瀑布流。
+
+**前提**：`src/config/siteConfig.ts` 里要有 `pages: { gallery: true }`，否则 `/gallery/` 路由根本不存在。
+
+（`galleryConfig.ts` 是主题自带的文件，属于「官方允许你改」的 `src/config/`。改它不会和主题更新冲突，但也意味着**加相册这件事无法完全在浏览器里完成**——CMS 能传图，不能登记相册。）
+
 ## 更新主题
 
 ```bash
 bash scripts/fireflytoolkit-merge-upstream.sh
 ```
 
-它会拉取上游并合并，同时保住你的内容。两件事被显式处理：`src/content/` 里的冲突以本地为准；而 `.github/dependabot.yml` 如果你删过，删除会被保留。
+它会拉取上游并合并，同时保住你的内容。**三件事**被显式处理：
+
+- `src/content/` 里的冲突以本地为准
+- `public/gallery/` 同理——相册照片就住在主题自带的那个目录里（构建时扫描它，换不了地方），而你删掉的 demo 相册如果被上游改过，删除会被保留
+- `.github/dependabot.yml` 如果你删过，删除会被保留
 
 它**刻意不用 `-X ours`**——那个开关会把 `src/config/` 的冲突也一并吞掉，而那些正是你想看的：主题更新在那里新增配置项，你需要决定是否接受。
 

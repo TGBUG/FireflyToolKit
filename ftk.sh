@@ -335,9 +335,15 @@ setup is done. what remains:
      the Actions tab when they do.
 
   3. delete the theme's demo content, so it is not published:
-         src/content/posts/     (all of the sample posts)
+         src/content/posts/     (the sample posts)
          src/content/dynamic/   (the sample moments)
-     and delete .github/dependabot.yml -- the theme configures Dependabot to run
+         public/gallery/        (the sample albums, photos and all)
+
+     The albums are also registered in src/config/galleryConfig.ts, so remove
+     their entries there as well -- deleting only the directories leaves the
+     gallery page pointing at paths that no longer exist.
+
+     And delete .github/dependabot.yml -- the theme configures Dependabot to run
      daily, which measured ten billed Actions minutes per run, five times what
      deploying costs.
 

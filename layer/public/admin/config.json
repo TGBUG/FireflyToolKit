@@ -6,8 +6,8 @@
     "branch": "master",
     "squash_merges": true
   },
-  "media_folder": "",
-  "public_folder": "",
+  "media_folder": "public/uploads",
+  "public_folder": "/uploads",
   "output": {
     "omit_empty_optional_fields": true
   },
@@ -20,6 +20,8 @@
       "create": true,
       "extension": "md",
       "format": "frontmatter",
+      "media_folder": "",
+      "public_folder": "",
       "slug": "{{fields._slug}}",
       "path": "{{fields._slug}}/index",
       "fields": [
@@ -85,6 +87,8 @@
       "create": true,
       "extension": "md",
       "format": "frontmatter",
+      "media_folder": "",
+      "public_folder": "",
       "path": "{{year}}-{{month}}-{{day}}-{{hour}}{{minute}}{{second}}",
       "fields": [
         {
@@ -106,6 +110,8 @@
       "create": true,
       "extension": "md",
       "format": "frontmatter",
+      "media_folder": "",
+      "public_folder": "",
       "fields": [
         { "label": "Title", "name": "title", "widget": "string" },
         {
@@ -145,6 +151,8 @@
       "create": false,
       "extension": "md",
       "format": "frontmatter",
+      "media_folder": "",
+      "public_folder": "",
       "fields": [{ "label": "Body", "name": "body", "widget": "markdown" }]
     }
   ]

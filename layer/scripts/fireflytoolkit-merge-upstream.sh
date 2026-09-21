@@ -4,10 +4,15 @@
 #
 #     bash scripts/fireflytoolkit-merge-upstream.sh [branch]
 #
-# Two things have to end up on our side of the merge, and neither is the default:
+# Three things have to end up on our side of the merge, and none of them is the
+# default:
 #
 #   * `src/content/` is this blog's content. Where upstream edited the same file,
 #     ours wins.
+#   * `public/gallery/` is where album photos live. The theme scans that
+#     directory at build time, so it is not a path that could be moved somewhere
+#     safer -- and it ships with two demo albums, which setup deletes. Upstream
+#     edits to those have to stay deleted.
 #   * `.github/dependabot.yml` was deleted on purpose during setup: the theme
 #     configures Dependabot for a daily run, which costs far more Actions minutes
 #     than deploying the blog does. If upstream ever edits that file, the
@@ -18,7 +23,7 @@
 # configuration options we do want. Those are left for you to resolve.
 #
 # One case is worth naming, because it is the one that actually happens: upstream
-# editing a demo post this blog deleted. Git reports that as a modify/delete
+# editing a demo post, or a demo album photo, that this blog deleted. Git reports that as a modify/delete
 # conflict, never consults a merge driver, and -- measured against git 2.45 --
 # leaves upstream's copy in the tree, so the demo post silently returns. It is
 # resolved explicitly below.
@@ -41,7 +46,7 @@ if ! git merge --no-edit "upstream/$branch"; then
 	while IFS= read -r path; do
 		[ -n "$path" ] || continue
 		case "$path" in
-		src/content/* | .github/dependabot.yml)
+		src/content/* | public/gallery/* | .github/dependabot.yml)
 			if git cat-file -e "HEAD:$path" 2>/dev/null; then
 				echo "keeping ours:     $path"
 				git checkout --ours -- "$path"
