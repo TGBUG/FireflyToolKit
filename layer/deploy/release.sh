@@ -60,8 +60,17 @@ ls -1dt -- */ 2>/dev/null | tail -n +"$((KEEP + 1))" | while IFS= read -r dir; d
 		echo "keeping $name: it is live"
 		continue
 	fi
-	echo "pruning $name"
-	rm -rf -- "$name"
+	# Report rather than fail. The release being deployed is already live, so a
+	# directory that will not delete is housekeeping, not a broken deploy -- but
+	# left silent it just accumulates.
+	if rm -rf -- "$name" 2>/dev/null; then
+		echo "pruned $name"
+	else
+		echo "could not prune $name -- something inside it resists deletion" >&2
+		echo "  a hosting panel can drop an immutable .user.ini into a site root." >&2
+		echo "  'lsattr <file>' shows it as 'i'; only root can clear it with" >&2
+		echo "  'chattr -i', after which the directory deletes normally." >&2
+	fi
 done
 
 echo "kept: $(ls -1dt -- */ 2>/dev/null | wc -l)"
