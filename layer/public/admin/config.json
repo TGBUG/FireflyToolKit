@@ -88,7 +88,7 @@
       "extension": "md",
       "format": "frontmatter",
       "media_folder": "/src/content/dynamic/images",
-      "public_folder": "images",
+      "public_folder": "./images",
       "path": "{{year}}-{{month}}-{{day}}-{{hour}}{{minute}}{{second}}",
       "fields": [
         {
@@ -111,7 +111,7 @@
       "extension": "md",
       "format": "frontmatter",
       "media_folder": "/src/content/projects/images",
-      "public_folder": "images",
+      "public_folder": "./images",
       "fields": [
         { "label": "Title", "name": "title", "widget": "string" },
         {
