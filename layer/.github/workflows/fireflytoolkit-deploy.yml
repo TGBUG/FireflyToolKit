@@ -19,8 +19,9 @@ on:
   # are set, without inventing an empty commit.
   workflow_dispatch:
 
+# Write, because publishing the build means creating a release.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: fireflytoolkit-deploy-${{ github.ref }}
@@ -67,42 +68,83 @@ jobs:
           # do not use the directive make no calls at all.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up SSH
+      # Why a release asset rather than streaming the build to the server:
+      #
+      # Measured, the runner's own egress is fast (~5 MB/s) but the direct route
+      # from a runner to a Hong Kong host is not -- 0.4 to 1.5 MB/s when it works
+      # at all, and roughly one run in four instead collapses to ~30 KB/s and
+      # takes ten minutes or dies. The same server pulls 3.2 MB/s from GitHub for
+      # every request, so putting the bytes on GitHub and letting the server fetch
+      # them moves the transfer onto the fast, stable path.
+      #
+      # It also removes the two failure modes that came with streaming: the
+      # server no longer holds a credential (a signed release URL needs none),
+      # and a transfer that fails now fails the step, because the SSH command's
+      # exit status is the pull's exit status.
+      - name: Publish the build and get a signed URL
+        id: publish
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release="$(date -u +%Y%m%d%H%M%S)"
+          tag="build-$release"
+          bundle="$RUNNER_TEMP/dist.tar.gz"
+
+          tar -czf "$bundle" -C dist .
+          echo "packaged $(du -h "$bundle" | cut -f1)"
+
+          gh release create "$tag" "$bundle" --title "$tag" --notes "automated build"
+
+          # browser_download_url is the one that redirects. The API asset endpoint
+          # streams the bytes instead, so it cannot be handed to the server.
+          url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            --jq '.assets[0].browser_download_url')"
+          signed="$(curl -sS -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" "$url" \
+            | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r')"
+          [ -n "$signed" ] || { echo "no signed URL came back" >&2; exit 1; }
+
+          # The URL is unauthenticated for about forty minutes, so keep it out of
+          # the log even though this job is the only reader.
+          echo "::add-mask::$signed"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # One asset per build; keep the two most recent and drop the rest, tags
+          # included, so a private repo does not accumulate them forever.
+          gh release list --limit 100 --json tagName --jq '.[2:] | .[].tagName' \
+            | xargs -r -n1 gh release delete --yes --cleanup-tag || true
+
+      - name: Deploy on the server
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_BASE: ${{ secrets.VPS_BASE }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SIGNED: ${{ steps.publish.outputs.signed }}
+          RELEASE: ${{ steps.publish.outputs.release }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          {
-            echo "Host *"
-            echo "  StrictHostKeyChecking accept-new"
-            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
-          } > ~/.ssh/config
-          chmod 600 ~/.ssh/config
 
-      - name: Upload release and switch
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_BASE: ${{ secrets.VPS_BASE }}
-        run: |
+          # ServerAliveInterval so a dead connection fails in a minute instead of
+          # hanging until the job times out.
+          ssh -i ~/.ssh/id_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=4 \
+              "$VPS_USER@$VPS_HOST" 'bash -s' <<REMOTE
           set -euo pipefail
-          release="$(date -u +%Y%m%d%H%M%S)"
-          target="$VPS_USER@$VPS_HOST"
-          opts=(-i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes)
-          echo "deploying release $release to $target:$VPS_BASE"
+          mkdir -p "$VPS_BASE/releases/$RELEASE"
 
-          ssh "${opts[@]}" "$target" "mkdir -p '$VPS_BASE/releases/$release'"
+          # The server fetches from GitHub's CDN, so --retry has something to
+          # work with: the signed URL stays valid for around forty minutes.
+          curl -fsSL --retry 3 --retry-delay 5 "$SIGNED" \
+            | tar -xzf - -C "$VPS_BASE/releases/$RELEASE"
 
-          # tar, not rsync. Every release lands in a fresh empty directory, so
-          # rsync's delta transfer and --delete have nothing to do, and a
-          # hosting-panel server may well not have rsync installed at all --
-          # measured, one did not. tar is on every Debian by default.
-          tar -czf - -C dist . \
-            | ssh "${opts[@]}" "$target" "tar -xzf - -C '$VPS_BASE/releases/$release'"
-
-          # The script lives at $VPS_BASE/release.sh and derives its own BASE
-          # from its location, so nothing here has to pass it through.
-          ssh "${opts[@]}" "$target" "bash '$VPS_BASE/release.sh' '$release'"
+          bash "$VPS_BASE/release.sh" "$RELEASE"
+          REMOTE
