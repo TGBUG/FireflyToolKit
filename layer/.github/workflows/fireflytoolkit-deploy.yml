@@ -19,9 +19,11 @@ on:
   # are set, without inventing an empty commit.
   workflow_dispatch:
 
-# Write, because publishing the build means creating a release.
+# Read-only, and `actions: read` has to be named explicitly: an explicit
+# permissions block turns every scope it does not mention off.
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 concurrency:
   group: fireflytoolkit-deploy-${{ github.ref }}
@@ -68,53 +70,36 @@ jobs:
           # do not use the directive make no calls at all.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Why a release asset rather than streaming the build to the server:
+      # Why the build travels through GitHub instead of straight to the server:
       #
       # Measured, the runner's own egress is fast (~5 MB/s) but the direct route
       # from a runner to a Hong Kong host is not -- 0.4 to 1.5 MB/s when it works
       # at all, and roughly one run in four instead collapses to ~30 KB/s and
       # takes ten minutes or dies. The same server pulls 3.2 MB/s from GitHub for
-      # every request, so putting the bytes on GitHub and letting the server fetch
+      # every request, so parking the bytes on GitHub and letting the server fetch
       # them moves the transfer onto the fast, stable path.
       #
       # It also removes the two failure modes that came with streaming: the
-      # server no longer holds a credential (a signed release URL needs none),
-      # and a transfer that fails now fails the step, because the SSH command's
-      # exit status is the pull's exit status.
-      - name: Publish the build and get a signed URL
-        id: publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          release="$(date -u +%Y%m%d%H%M%S)"
-          tag="build-$release"
-          bundle="$RUNNER_TEMP/dist.tar.gz"
+      # server holds no credential, and a transfer that fails now fails the step,
+      # because the SSH command's exit status is the transfer's exit status.
+      #
+      # A release asset would have been the obvious carrier, but it does not work
+      # here: `browser_download_url` answers 404 for a private repository no
+      # matter how the request is authenticated, measured with a bearer token and
+      # with basic auth. An Actions artifact does redirect, and its URL is
+      # short-lived -- which is fine, because the runner can mint a fresh one for
+      # every attempt.
+      - name: Package the build
+        run: tar -czf "$RUNNER_TEMP/dist.tar.gz" -C dist .
 
-          tar -czf "$bundle" -C dist .
-          echo "packaged $(du -h "$bundle" | cut -f1)"
-
-          gh release create "$tag" "$bundle" --title "$tag" --notes "automated build"
-
-          # browser_download_url is the one that redirects. The API asset endpoint
-          # streams the bytes instead, so it cannot be handed to the server.
-          url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-            --jq '.assets[0].browser_download_url')"
-          signed="$(curl -sS -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" "$url" \
-            | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r')"
-          [ -n "$signed" ] || { echo "no signed URL came back" >&2; exit 1; }
-
-          # The URL is unauthenticated for about forty minutes, so keep it out of
-          # the log even though this job is the only reader.
-          echo "::add-mask::$signed"
-          echo "release=$release" >> "$GITHUB_OUTPUT"
-          echo "signed=$signed" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-          # One asset per build; keep the two most recent and drop the rest, tags
-          # included, so a private repo does not accumulate them forever.
-          gh release list --limit 100 --json tagName --jq '.[2:] | .[].tagName' \
-            | xargs -r -n1 gh release delete --yes --cleanup-tag || true
+      - name: Upload the build as an artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist.tar.gz
+          # Only the VPS needs it, and only in the next minute or two.
+          retention-days: 1
 
       - name: Deploy on the server
         env:
@@ -122,29 +107,75 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_BASE: ${{ secrets.VPS_BASE }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          SIGNED: ${{ steps.publish.outputs.signed }}
-          RELEASE: ${{ steps.publish.outputs.release }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          RELEASE: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
-          # ServerAliveInterval so a dead connection fails in a minute instead of
-          # hanging until the job times out.
-          ssh -i ~/.ssh/id_ed25519 \
-              -o IdentitiesOnly=yes \
-              -o StrictHostKeyChecking=accept-new \
-              -o ServerAliveInterval=15 \
-              -o ServerAliveCountMax=4 \
-              "$VPS_USER@$VPS_HOST" 'bash -s' <<REMOTE
-          set -euo pipefail
-          mkdir -p "$VPS_BASE/releases/$RELEASE"
+          # The artifact download answers 302 to a signed URL that expires
+          # quickly, so it is minted fresh per attempt rather than once.
+          mint() {
+            curl -sS -o /dev/null -D - \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+              | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r'
+          }
 
-          # The server fetches from GitHub's CDN, so --retry has something to
-          # work with: the signed URL stays valid for around forty minutes.
-          curl -fsSL --retry 3 --retry-delay 5 "$SIGNED" \
-            | tar -xzf - -C "$VPS_BASE/releases/$RELEASE"
+          for attempt in 1 2 3; do
+            signed="$(mint)"
+            if [ -z "$signed" ]; then
+              status="$(curl -sS -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" || true)"
+              echo "attempt $attempt: no Location header from the artifact API (HTTP $status)" >&2
+              sleep 5
+              continue
+            fi
+            echo "::add-mask::$signed"
+
+            # ServerAliveInterval so a dead connection fails in a minute instead
+            # of hanging until the job times out.
+            if ssh -i ~/.ssh/id_ed25519 \
+                 -o IdentitiesOnly=yes \
+                 -o StrictHostKeyChecking=accept-new \
+                 -o ServerAliveInterval=15 \
+                 -o ServerAliveCountMax=4 \
+                 "$VPS_USER@$VPS_HOST" 'bash -s' <<REMOTE
+          set -euo pipefail
+          release="$VPS_BASE/releases/$RELEASE"
+          work="\$(mktemp -d)"
+          trap 'rm -rf "\$work"' EXIT
+
+          # Start clean, so a retry after a half-finished attempt cannot leave a
+          # release containing a mixture of two transfers.
+          rm -rf "\$release"
+          mkdir -p "\$release"
+
+          # The artifact is a zip wrapping the tarball. unzip is present on the
+          # server; funzip and streaming into tar were not verified, so this
+          # takes the two steps it can rely on.
+          curl -fsSL --retry 3 --retry-delay 2 "$signed" -o "\$work/a.zip"
+          unzip -q "\$work/a.zip" -d "\$work/x"
+          tarball="\$(find "\$work/x" -name 'dist.tar.gz' -type f | head -n1)"
+          [ -n "\$tarball" ] || { echo "the artifact had no dist.tar.gz" >&2; exit 1; }
+          tar -xzf "\$tarball" -C "\$release"
 
           bash "$VPS_BASE/release.sh" "$RELEASE"
           REMOTE
+            then
+              echo "deployed release $RELEASE"
+              exit 0
+            fi
+            echo "attempt $attempt failed; re-signing and retrying" >&2
+            sleep 5
+          done
+
+          echo "deploy failed after 3 attempts" >&2
+          exit 1
